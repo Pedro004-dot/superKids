@@ -12,10 +12,17 @@ interface SetupProps {
     heroName: string;
     selectedGenre: string;
     customPremise: string;
+    comicType?: 'single' | 'series';
+    seriesTitle?: string;
+    seriesParts?: number;
+    credits: number;
     onHeroUpload: (file: File) => void;
     onHeroNameChange: (name: string) => void;
     onGenreChange: (val: string) => void;
     onPremiseChange: (val: string) => void;
+    onComicTypeChange?: (type: 'single' | 'series') => void;
+    onSeriesTitleChange?: (title: string) => void;
+    onSeriesPartsChange?: (parts: number) => void;
     onLaunch: () => void;
     isGenerating: boolean;
 }
@@ -91,6 +98,77 @@ export const Setup: React.FC<SetupProps> = (props) => {
                         
                         <div className="bg-yellow-50 p-4 border-4 border-black h-full flex flex-col justify-between">
                             <div>
+                                {/* Tipo de Gibi */}
+                                <div className="mb-4">
+                                    <p className="font-comic text-lg mb-2 font-bold text-gray-800">TIPO DE GIBI</p>
+                                    <div className="flex gap-4">
+                                        <label className={`flex-1 p-3 border-4 border-black cursor-pointer transition-all ${
+                                            props.comicType === 'single' || !props.comicType
+                                                ? 'bg-blue-500 text-white'
+                                                : 'bg-white text-black hover:bg-gray-100'
+                                        }`}>
+                                            <input
+                                                type="radio"
+                                                name="comicType"
+                                                value="single"
+                                                checked={props.comicType === 'single' || !props.comicType}
+                                                onChange={() => props.onComicTypeChange?.('single')}
+                                                className="hidden"
+                                            />
+                                            <span className="font-comic text-lg uppercase block text-center">Gibi Único</span>
+                                        </label>
+                                        <label className={`flex-1 p-3 border-4 border-black cursor-pointer transition-all ${
+                                            props.comicType === 'series'
+                                                ? 'bg-blue-500 text-white'
+                                                : 'bg-white text-black hover:bg-gray-100'
+                                        }`}>
+                                            <input
+                                                type="radio"
+                                                name="comicType"
+                                                value="series"
+                                                checked={props.comicType === 'series'}
+                                                onChange={() => props.onComicTypeChange?.('series')}
+                                                className="hidden"
+                                            />
+                                            <span className="font-comic text-lg uppercase block text-center">Série</span>
+                                        </label>
+                                    </div>
+                                </div>
+
+                                {/* Campos de Série */}
+                                {props.comicType === 'series' && (
+                                    <>
+                                        <div className="mb-4">
+                                            <p className="font-comic text-lg mb-1 font-bold text-gray-800">TÍTULO DA SÉRIE</p>
+                                            <input
+                                                type="text"
+                                                value={props.seriesTitle || ''}
+                                                onChange={(e) => props.onSeriesTitleChange?.(e.target.value)}
+                                                placeholder="Ex: Aventuras de João"
+                                                className="w-full p-2 border-2 border-black font-comic text-lg uppercase shadow-[3px_3px_0px_rgba(0,0,0,0.1)] bg-white text-black"
+                                                maxLength={50}
+                                            />
+                                        </div>
+                                        <div className="mb-4">
+                                            <p className="font-comic text-lg mb-1 font-bold text-gray-800">NÚMERO DE PARTES (2-6)</p>
+                                            <select
+                                                value={props.seriesParts || 4}
+                                                onChange={(e) => props.onSeriesPartsChange?.(parseInt(e.target.value))}
+                                                className="w-full font-comic text-xl p-2 border-2 border-black uppercase bg-white text-black cursor-pointer shadow-[3px_3px_0px_rgba(0,0,0,0.1)]"
+                                            >
+                                                {[2, 3, 4, 5, 6].map(num => (
+                                                    <option key={num} value={num}>Parte {num}</option>
+                                                ))}
+                                            </select>
+                                            {props.seriesParts && props.seriesParts > props.credits && (
+                                                <p className="text-red-600 font-comic text-sm mt-1">
+                                                    Você precisa de {props.seriesParts} créditos (tem {props.credits})
+                                                </p>
+                                            )}
+                                        </div>
+                                    </>
+                                )}
+
                                 <div className="mb-4">
                                     <p className="font-comic text-lg mb-1 font-bold text-gray-800">TEMA DA AVENTURA</p>
                                     <select value={props.selectedGenre} onChange={(e) => props.onGenreChange(e.target.value)} className="w-full font-comic text-xl p-2 border-2 border-black uppercase bg-white text-black cursor-pointer shadow-[3px_3px_0px_rgba(0,0,0,0.1)] focus:outline-none transition-all">
