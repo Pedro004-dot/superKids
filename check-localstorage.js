@@ -1,0 +1,1 @@
+console.log('LocalStorage Supabase:', Object.keys(localStorage).filter(k => k.includes('supabase') || k.includes('sb-')).map(k => ({ key: k, value: localStorage.getItem(k)?.substring(0, 100) + '...' })));

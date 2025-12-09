@@ -7,6 +7,10 @@ import React, { useState, useEffect } from 'react';
 import { ComicFace } from './types';
 import { supabase } from './supabase';
 
+// Constantes para fallback REST
+const SUPABASE_URL = (import.meta as any).env?.VITE_SUPABASE_URL || 'https://nxorwtmtgxvpqmrwhvdx.supabase.co';
+const SUPABASE_ANON_KEY = (import.meta as any).env?.VITE_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im54b3J3dG10Z3h2cHFtcndodmR4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjQ4Nzg2MjAsImV4cCI6MjA4MDQ1NDYyMH0.L4ddiW6F38HrOwdwTlFKALAHvVPXTJkyE0IyNb4W1P8';
+
 interface Comic {
   id: string;
   hero_name: string;
@@ -45,52 +49,206 @@ interface Comic {
 interface GalleryProps {
   onSelectComic: (comic: Comic) => void;
   onDeleteComic: (id: string) => void;
+  userId?: string | null;
 }
 
-export const Gallery: React.FC<GalleryProps> = ({ onSelectComic, onDeleteComic }) => {
+export const Gallery: React.FC<GalleryProps> = ({ onSelectComic, onDeleteComic, userId }) => {
   const [comics, setComics] = useState<Comic[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
   const [filterGenre, setFilterGenre] = useState<string>('all');
   const [sortBy, setSortBy] = useState<'newest' | 'oldest' | 'name'>('newest');
+  
+  // Estados para modais
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [showViewModal, setShowViewModal] = useState(false);
+  const [selectedComic, setSelectedComic] = useState<Comic | null>(null);
 
   useEffect(() => {
-    loadComics();
-  }, []);
+    console.log('[Gallery useEffect] Iniciando...');
+    
+    // Timeout de EMERGÊNCIA - forçar loading=false após 5s
+    const emergencyTimeout = setTimeout(() => {
+      console.error('[Gallery] ⚠️ TIMEOUT DE EMERGÊNCIA (5s) - Forçando loading=false');
+      setLoading(false);
+      setComics([]);
+    }, 5000);
+    
+    loadComics().finally(() => {
+      clearTimeout(emergencyTimeout);
+    });
+    
+    return () => {
+      clearTimeout(emergencyTimeout);
+    };
+  }, [userId]);
 
   const loadComics = async () => {
+    console.log('[Gallery.loadComics] ===== FUNÇÃO CHAMADA =====');
+    const startTime = Date.now();
+    
     try {
-      const { data, error } = await supabase
+      console.log('[Gallery] ===== CARREGANDO GIBIS =====');
+      console.log('[Gallery] Timestamp:', new Date().toISOString());
+      console.log('[Gallery] Loading atual:', loading);
+      console.log('[Gallery] User ID recebido:', userId);
+      console.log('[Gallery] User ID tipo:', typeof userId);
+      console.log('[Gallery] User ID válido?', !!userId);
+      console.log('[Gallery] Supabase client disponível:', !!supabase);
+      
+      // Obter user do Supabase com TIMEOUT
+      let currentUserId = userId;
+      
+      if (!currentUserId) {
+        console.log('[Gallery] User ID não fornecido, tentando obter do Supabase (timeout 1s)...');
+        try {
+          const userPromise = supabase.auth.getUser();
+          const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => {
+            console.warn('[Gallery] ⏱️ TIMEOUT (1s) ao obter usuário');
+            resolve(null);
+          }, 1000));
+          
+          const result = await Promise.race([userPromise, timeoutPromise]);
+          
+          if (result && result.data?.user) {
+            currentUserId = result.data.user.id;
+            console.log('[Gallery] ✓ User ID obtido do Supabase:', currentUserId);
+          } else {
+            console.warn('[Gallery] ⚠️ Não foi possível obter user ID, carregando TODOS os gibis');
+          }
+        } catch (err) {
+          console.warn('[Gallery] ⚠️ Erro ao obter user (não-crítico):', err);
+        }
+      }
+      
+      console.log('[Gallery] User ID final para filtro:', currentUserId);
+      
+      let query = supabase
         .from('comics')
-        .select('*, comic_series(title, total_parts, current_part, status)')
-        .order('created_at', { ascending: false });
+        .select('*');
+      
+      // Filtrar por usuário apenas se tivermos o ID
+      if (currentUserId) {
+        console.log('[Gallery] Filtrando por user_id:', currentUserId);
+        query = query.eq('user_id', currentUserId);
+      } else {
+        console.log('[Gallery] ⚠️ SEM FILTRO - Carregando TODOS os gibis (auth travou)');
+      }
+      
+      console.log('[Gallery] Executando query...');
+      
+      // Timeout de 3s na query
+      const queryPromise = query.order('created_at', { ascending: false });
+      const timeoutPromise = new Promise<{ data: null, error: any }>((resolve) => {
+        setTimeout(() => {
+          console.error('[Gallery] ⏱️ TIMEOUT (3s) na query!');
+          resolve({ data: null, error: { message: 'Query timeout' } });
+        }, 3000);
+      });
+      
+      const { data, error } = await Promise.race([queryPromise, timeoutPromise]);
 
-      if (error) throw error;
+      console.log('[Gallery] ⏱️ Query levou:', Date.now() - startTime, 'ms');
+      console.log('[Gallery] Resposta:', { 
+        dataLength: data?.length, 
+        error: error?.message,
+        data: data?.map(c => ({ id: c.id, hero_name: c.hero_name, user_id: c.user_id }))
+      });
+      
+      if (error) {
+        console.error('[Gallery] ❌ Erro na query:', error);
+        
+        // Se deu timeout, tentar sem query builder (usar REST direto)
+        if (error?.message === 'Query timeout') {
+          console.warn('[Gallery] Tentando método alternativo (REST API direto)...');
+          
+          try {
+            const restUrl = `${(window as any).__supabaseUrl || 'https://nxorwtmtgxvpqmrwhvdx.supabase.co'}/rest/v1/comics`;
+            const restResponse = await fetch(`${restUrl}?order=created_at.desc`, {
+              headers: {
+                'apikey': (window as any).__supabaseAnonKey || SUPABASE_ANON_KEY,
+                'Authorization': `Bearer ${(window as any).__supabaseAnonKey || SUPABASE_ANON_KEY}`
+              },
+              signal: AbortSignal.timeout(3000)
+            });
+            
+            if (restResponse.ok) {
+              const restData = await restResponse.json();
+              console.log('[Gallery] ✅ Dados via REST:', restData.length);
+              setComics(restData || []);
+              setLoading(false);
+              return;
+            }
+          } catch (restErr) {
+            console.error('[Gallery] ❌ REST também falhou:', restErr);
+          }
+        }
+        
+        // Se tudo falhar, mostrar array vazio
+        console.warn('[Gallery] Mostrando galeria vazia');
+        setComics([]);
+        setLoading(false);
+        return;
+      }
+      
+      console.log('[Gallery] ✅ Gibis carregados:', data?.length || 0);
+      console.log('[Gallery] ===== CARREGAMENTO COMPLETO =====');
       setComics(data || []);
     } catch (error) {
-      console.error('Erro ao carregar gibis:', error);
+      console.error('[Gallery] ❌ EXCEÇÃO ao carregar gibis:', error);
+      console.log('[Gallery] ⏱️ Tempo até exceção:', Date.now() - startTime, 'ms');
+      
+      // Garantir que loading seja desativado
+      setComics([]);
+      setLoading(false);
     } finally {
+      console.log('[Gallery] Finally block - setLoading(false)');
       setLoading(false);
     }
   };
 
-  const handleDelete = async (id: string, e: React.MouseEvent) => {
+  const handleDeleteClick = (comic: Comic, e: React.MouseEvent) => {
     e.stopPropagation();
-    if (!confirm('Tem certeza que deseja deletar este gibi?')) return;
+    setSelectedComic(comic);
+    setShowDeleteModal(true);
+  };
+
+  const confirmDelete = async () => {
+    if (!selectedComic) return;
 
     try {
       const { error } = await supabase
         .from('comics')
         .delete()
-        .eq('id', id);
+        .eq('id', selectedComic.id);
 
       if (error) throw error;
-      setComics(prev => prev.filter(c => c.id !== id));
-      onDeleteComic(id);
+
+      setComics(prev => prev.filter(comic => comic.id !== selectedComic.id));
+      onDeleteComic(selectedComic.id);
+      setShowDeleteModal(false);
+      setSelectedComic(null);
     } catch (error) {
       console.error('Erro ao deletar gibi:', error);
-      alert('Erro ao deletar gibi. Tente novamente.');
+      alert('Erro ao deletar o gibi. Tente novamente.');
     }
+  };
+
+  const handleComicClick = (comic: Comic) => {
+    setSelectedComic(comic);
+    setShowViewModal(true);
+  };
+
+  const handleViewComic = () => {
+    if (!selectedComic) return;
+    setShowViewModal(false);
+    onSelectComic(selectedComic);
+  };
+
+  const handleDownloadPDF = () => {
+    if (!selectedComic?.pdf_url) return;
+    window.open(selectedComic.pdf_url, '_blank');
+    setShowViewModal(false);
   };
 
   const filteredComics = comics.filter(comic => {
@@ -195,7 +353,7 @@ export const Gallery: React.FC<GalleryProps> = ({ onSelectComic, onDeleteComic }
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6 max-w-7xl mx-auto">
           {sortedComics.map((comic) => {
-            const coverImage = comic.comic_data?.comicFaces?.find(f => f.type === 'cover')?.imageUrl;
+            const coverImage = comic.cover_url || comic.comic_data?.comicFaces?.find(f => f.type === 'cover')?.imageUrl;
             const heroName = comic.hero_name;
             const genre = comic.genre;
             const createdAt = new Date(comic.created_at).toLocaleDateString('pt-BR');
@@ -205,7 +363,7 @@ export const Gallery: React.FC<GalleryProps> = ({ onSelectComic, onDeleteComic }
             return (
               <div
                 key={comic.id}
-                onClick={() => onSelectComic(comic)}
+                onClick={() => handleComicClick(comic)}
                 className="bg-white border-[6px] border-black shadow-[8px_8px_0px_rgba(0,0,0,1)] cursor-pointer hover:shadow-[12px_12px_0px_rgba(0,0,0,1)] hover:translate-x-[-4px] hover:translate-y-[-4px] transition-all group relative"
               >
                 {/* Badge de Série */}
@@ -247,7 +405,7 @@ export const Gallery: React.FC<GalleryProps> = ({ onSelectComic, onDeleteComic }
 
                 {/* Botão Deletar */}
                 <button
-                  onClick={(e) => handleDelete(comic.id, e)}
+                  onClick={(e) => handleDeleteClick(comic, e)}
                   className="absolute top-2 right-2 bg-red-600 text-white p-2 rounded-full opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-700 border-2 border-black"
                   title="Deletar gibi"
                 >
@@ -272,6 +430,103 @@ export const Gallery: React.FC<GalleryProps> = ({ onSelectComic, onDeleteComic }
           {sortedComics.length} {sortedComics.length === 1 ? 'gibi' : 'gibis'} {searchTerm || filterGenre !== 'all' ? 'encontrado(s)' : 'na galeria'}
         </p>
       </div>
+
+      {/* Modal de Confirmação de Delete */}
+      {showDeleteModal && selectedComic && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white border-[6px] border-black shadow-[12px_12px_0px_rgba(0,0,0,1)] max-w-md w-full p-6">
+            <h3 className="font-comic text-2xl text-black mb-4 text-center">DELETAR GIBI</h3>
+            <p className="text-center text-black mb-6">
+              Tem certeza que deseja deletar o gibi <strong>"{selectedComic.hero_name}"</strong>?
+            </p>
+            <p className="text-center text-red-600 text-sm mb-6">
+              Esta ação não pode ser desfeita!
+            </p>
+            <div className="flex gap-4">
+              <button
+                onClick={() => {
+                  setShowDeleteModal(false);
+                  setSelectedComic(null);
+                }}
+                className="flex-1 bg-gray-500 text-white p-3 border-2 border-black font-comic text-lg hover:bg-gray-600 transition-colors"
+              >
+                CANCELAR
+              </button>
+              <button
+                onClick={confirmDelete}
+                className="flex-1 bg-red-600 text-white p-3 border-2 border-black font-comic text-lg hover:bg-red-700 transition-colors"
+              >
+                DELETAR
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal de Visualização */}
+      {showViewModal && selectedComic && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white border-[6px] border-black shadow-[12px_12px_0px_rgba(0,0,0,1)] max-w-md w-full p-6">
+            <h3 className="font-comic text-2xl text-black mb-4 text-center">VISUALIZAR GIBI</h3>
+            
+            {/* Capa do Gibi */}
+            <div className="mb-6 flex justify-center">
+              <div className="w-32 h-48 border-2 border-black overflow-hidden">
+                {(selectedComic.cover_url || selectedComic.comic_data?.comicFaces?.find(f => f.type === 'cover')?.imageUrl) ? (
+                  <img
+                    src={selectedComic.cover_url || selectedComic.comic_data?.comicFaces?.find(f => f.type === 'cover')?.imageUrl}
+                    alt={`Capa de ${selectedComic.hero_name}`}
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
+                  <div className="w-full h-full bg-gray-200 flex items-center justify-center">
+                    <span className="text-2xl">📚</span>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="text-center mb-6">
+              <h4 className="font-comic text-xl text-black mb-2">{selectedComic.hero_name}</h4>
+              <p className="text-gray-600 mb-1">{selectedComic.genre}</p>
+              <p className="text-gray-500 text-sm">
+                {selectedComic.total_pages || 1} páginas • {new Date(selectedComic.created_at).toLocaleDateString('pt-BR')}
+              </p>
+            </div>
+
+            <div className="space-y-3">
+              {/* Botão Visualizar */}
+              <button
+                onClick={handleViewComic}
+                className="w-full bg-blue-600 text-white p-3 border-2 border-black font-comic text-lg hover:bg-blue-700 transition-colors"
+              >
+                📖 VISUALIZAR NO APP
+              </button>
+
+              {/* Botão Download PDF (se disponível) */}
+              {selectedComic.pdf_url && (
+                <button
+                  onClick={handleDownloadPDF}
+                  className="w-full bg-green-600 text-white p-3 border-2 border-black font-comic text-lg hover:bg-green-700 transition-colors"
+                >
+                  📄 ABRIR PDF EM NOVA ABA
+                </button>
+              )}
+
+              {/* Botão Cancelar */}
+              <button
+                onClick={() => {
+                  setShowViewModal(false);
+                  setSelectedComic(null);
+                }}
+                className="w-full bg-gray-500 text-white p-3 border-2 border-black font-comic text-lg hover:bg-gray-600 transition-colors"
+              >
+                FECHAR
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

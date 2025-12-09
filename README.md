@@ -14,12 +14,33 @@ View your app in AI Studio: https://ai.studio/apps/drive/17zZLCPD-mbHHULC6Alx21p
 
 
 1. Install dependencies:
-   `npm install`
-2. Create a `.env.local` file in the root directory with:
+   ```bash
+   npm install
    ```
-   GEMINI_API_KEY=your_gemini_api_key_here
-   VITE_SUPABASE_URL=https://nxorwtmtgxvpqmrwhvdx.supabase.co
-   VITE_SUPABASE_ANON_KEY=sb_publishable_imX8_j6mo43jKm1g1SnbLw_6A7GJZlM
+
+2. Create a `.env` file in the root directory with your credentials:
+   ```bash
+   # Google Gemini API Key
+   VITE_GEMINI_API_KEY=your_gemini_api_key_here
+   
+   # Supabase Configuration
+   VITE_SUPABASE_URL=https://your-project.supabase.co
+   VITE_SUPABASE_ANON_KEY=your_anon_key_here
    ```
+
+   **⚠️ IMPORTANTE - Como obter as credenciais Supabase:**
+   
+   a. Acesse o [Supabase Dashboard](https://supabase.com/dashboard)
+   
+   b. Vá em **Settings → API**
+   
+   c. Copie:
+      - **URL**: Sua URL do projeto (ex: `https://xxx.supabase.co`)
+      - **Anon Key**: A chave pública anon (formato longo JWT que começa com `eyJ...`)
+   
+   **⚠️ NÃO use a Publishable Key** (formato `sb_publishable_xxx`). Use a **Anon Key** tradicional (formato JWT longo).
+
 3. Run the app:
-   `npm run dev`
+   ```bash
+   npm run dev
+   ```

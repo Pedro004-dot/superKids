@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Debug Auth - Super Kids</title>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body>
+    <h1>Debug Auth - Super Kids</h1>
+    
+    <div id="status">Verificando...</div>
+    
+    <script>
+        // ⚠️ ATENÇÃO: Substitua com suas credenciais do .env
+        // Obtenha em: https://supabase.com/dashboard/project/_/settings/api
+        // Use a ANON KEY (formato JWT longo), NÃO a Publishable Key!
+        const supabaseUrl = 'SEU_SUPABASE_URL_AQUI';
+        const supabaseAnonKey = 'SUA_ANON_KEY_AQUI';
+        
+        const { createClient } = supabase;
+        const client = createClient(supabaseUrl, supabaseAnonKey);
+        
+        async function debugAuth() {
+            const statusDiv = document.getElementById('status');
+            
+            // 1. Verificar localStorage
+            console.log('=== LOCALSTORAGE ===');
+            const localStorageKeys = Object.keys(localStorage).filter(k => 
+                k.includes('supabase') || k.includes('sb-')
+            );
+            
+            console.log('Chaves do Supabase no localStorage:', localStorageKeys);
+            localStorageKeys.forEach(key => {
+                const value = localStorage.getItem(key);
+                console.log(`${key}:`, value ? value.substring(0, 200) + '...' : 'null');
+            });
+            
+            // 2. Verificar sessão atual
+            console.log('=== SESSÃO ATUAL ===');
+            const { data: { session }, error } = await client.auth.getSession();
+            
+            if (error) {
+                console.error('Erro ao obter sessão:', error);
+                statusDiv.innerHTML = `❌ Erro: ${error.message}`;
+                return;
+            }
+            
+            if (session?.user) {
+                console.log('✅ Usuário autenticado:', {
+                    id: session.user.id,
+                    email: session.user.email,
+                    hasAccessToken: !!session.access_token,
+                    hasRefreshToken: !!session.refresh_token,
+                    tokenType: session.token_type,
+                    expiresAt: session.expires_at ? new Date(session.expires_at * 1000) : null
+                });
+                
+                statusDiv.innerHTML = `
+                    ✅ Usuário autenticado<br>
+                    ID: ${session.user.id}<br>
+                    Email: ${session.user.email}<br>
+                    Token válido: ${!!session.access_token}<br>
+                    Expira em: ${session.expires_at ? new Date(session.expires_at * 1000).toLocaleString() : 'N/A'}
+                `;
+                
+                // 3. Testar uma query simples
+                console.log('=== TESTE DE QUERY ===');
+                const { data: profile, error: profileError } = await client
+                    .from('profiles')
+                    .select('*')
+                    .eq('id', session.user.id)
+                    .single();
+                
+                if (profileError) {
+                    console.error('Erro ao buscar perfil:', profileError);
+                } else {
+                    console.log('✅ Perfil encontrado:', profile);
+                }
+                
+            } else {
+                console.log('❌ Usuário não autenticado');
+                statusDiv.innerHTML = '❌ Usuário não autenticado';
+            }
+        }
+        
+        debugAuth();
+    </script>
+</body>
+</html>

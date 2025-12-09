@@ -25,6 +25,654 @@ const MODEL_V3 = "gemini-3-pro-image-preview";
 const MODEL_IMAGE_GEN_NAME = MODEL_V3;
 const MODEL_TEXT_NAME = MODEL_V3;
 
+// --- Supabase REST API Constants (from environment variables) ---
+const getEnvVar = (key: string): string => {
+  const value = (import.meta as any).env?.[key];
+  if (!value) {
+    console.error(`[Config] ❌ Variável ${key} NÃO DEFINIDA!`);
+    throw new Error(`Environment variable ${key} is not defined. Please add it to your .env file.`);
+  }
+  console.log(`[Config] ✓ ${key} carregada (${value.substring(0, 20)}...)`);
+  return value;
+};
+
+const SUPABASE_URL = getEnvVar('VITE_SUPABASE_URL');
+const SUPABASE_ANON_KEY = getEnvVar('VITE_SUPABASE_ANON_KEY');
+const SUPABASE_REST_URL = `${SUPABASE_URL}/rest/v1`;
+const SUPABASE_STORAGE_URL = `${SUPABASE_URL}/storage/v1`;
+
+// Validar se ANON_KEY é JWT válida (deve começar com eyJ)
+if (!SUPABASE_ANON_KEY.startsWith('eyJ')) {
+  console.error('[Config] ❌ ERRO: ANON_KEY não é JWT válida!');
+  console.error('[Config] Formato atual:', SUPABASE_ANON_KEY.substring(0, 30));
+  console.error('[Config] Você está usando Publishable Key ao invés de Anon Key!');
+  console.error('[Config] Use a chave que começa com "eyJ..." do dashboard do Supabase');
+  alert('⚠️ ERRO DE CONFIGURAÇÃO:\n\nVocê está usando a chave errada!\n\nUse a ANON KEY (formato JWT), não a Publishable Key.\n\nVerifique o arquivo .env e CONFIGURACAO.md');
+}
+
+console.log('[Config] ✓ Supabase URL:', SUPABASE_URL);
+console.log('[Config] ✓ Anon Key formato:', SUPABASE_ANON_KEY.startsWith('eyJ') ? 'JWT válida ✓' : 'INVÁLIDA ❌');
+console.log('[Config] ✓ REST API URL:', SUPABASE_REST_URL);
+console.log('[Config] ✓ Storage URL:', SUPABASE_STORAGE_URL);
+
+// --- Helper: Get Auth Token from active session (with auto-refresh and TIMEOUT) ---
+const getAuthToken = async (): Promise<string | null> => {
+  const startTime = Date.now();
+  console.log('[getAuthToken] 🔑 Obtendo token...');
+  
+  try {
+    // TIMEOUT de 2 segundos - se getSession travar, retornar null
+    const sessionPromise = supabase.auth.getSession();
+    const timeoutPromise = new Promise<null>((resolve) => {
+      setTimeout(() => {
+        console.error('[getAuthToken] ⏱️ TIMEOUT (2s) - getSession travou!');
+        resolve(null);
+      }, 2000);
+    });
+    
+    const result = await Promise.race([sessionPromise, timeoutPromise]);
+    
+    if (!result) {
+      console.error('[getAuthToken] ❌ getSession travou ou falhou');
+      return null;
+    }
+    
+    const { data: { session }, error } = result;
+    
+    console.log('[getAuthToken] ⏱️ getSession levou:', Date.now() - startTime, 'ms');
+    
+    if (error) {
+      console.warn('[getAuthToken] ❌ Erro ao obter sessão:', error.message);
+      return null;
+    }
+    
+    if (session?.access_token) {
+      // Verificar se o token vai expirar em breve (menos de 60s)
+      const expiresAt = session.expires_at || 0;
+      const now = Math.floor(Date.now() / 1000);
+      const timeUntilExpiry = expiresAt - now;
+      
+      console.log(`[getAuthToken] ⏰ Token válido por mais ${timeUntilExpiry}s`);
+      
+      if (timeUntilExpiry < 60) {
+        console.warn('[getAuthToken] ⚠️ Token expirando em breve, forçando refresh...');
+        const refreshStart = Date.now();
+        
+        // Timeout também no refresh
+        const refreshPromise = supabase.auth.refreshSession();
+        const refreshTimeoutPromise = new Promise<null>((resolve) => {
+          setTimeout(() => {
+            console.error('[getAuthToken] ⏱️ TIMEOUT (2s) - refreshSession travou!');
+            resolve(null);
+          }, 2000);
+        });
+        
+        const refreshResult = await Promise.race([refreshPromise, refreshTimeoutPromise]);
+        
+        if (!refreshResult) {
+          console.error('[getAuthToken] ❌ refreshSession travou, usando token antigo');
+          return session.access_token;
+        }
+        
+        const { data: { session: refreshedSession }, error: refreshError } = refreshResult;
+        
+        console.log('[getAuthToken] ⏱️ refreshSession levou:', Date.now() - refreshStart, 'ms');
+        
+        if (refreshError || !refreshedSession) {
+          console.error('[getAuthToken] ❌ Erro ao fazer refresh:', refreshError?.message);
+          return session.access_token; // Retornar token antigo como fallback
+        }
+        
+        console.log('[getAuthToken] ✅ Token refreshed com sucesso');
+        return refreshedSession.access_token;
+      }
+      
+      console.log('[getAuthToken] ✅ Token válido (total:', Date.now() - startTime, 'ms)');
+      return session.access_token;
+    }
+    
+    console.warn('[getAuthToken] ⚠️ Nenhuma sessão ativa encontrada');
+    return null;
+  } catch (e) {
+    console.error('[getAuthToken] ❌ Exceção (tempo:', Date.now() - startTime, 'ms):', e);
+    return null;
+  }
+};
+
+// --- Helper: Check if JWT token is expired ---
+const isTokenExpired = (token: string): boolean => {
+  try {
+    // Decodificar JWT (base64)
+    const parts = token.split('.');
+    if (parts.length !== 3) return true;
+    
+    const payload = JSON.parse(atob(parts[1]));
+    const exp = payload.exp;
+    
+    if (!exp) return true;
+    
+    const now = Math.floor(Date.now() / 1000);
+    const timeUntilExpiry = exp - now;
+    
+    console.log(`[isTokenExpired] Token expira em ${timeUntilExpiry}s`);
+    
+    return timeUntilExpiry <= 0;
+  } catch (e) {
+    console.error('[isTokenExpired] Erro ao verificar token:', e);
+    return true;
+  }
+};
+
+// --- Helper: Fetch with timeout ---
+const fetchWithTimeout = async (url: string, options: RequestInit, timeoutMs: number): Promise<Response> => {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+    return response;
+  } catch (error: any) {
+    clearTimeout(timeoutId);
+    if (error.name === 'AbortError') {
+      throw new Error(`Timeout após ${timeoutMs}ms`);
+    }
+    throw error;
+  }
+};
+
+// --- REST API Helper: Upload Image to Storage ---
+const uploadImageToStorage = async (
+  filePath: string,
+  blob: Blob,
+  retries: number = 3
+): Promise<string> => {
+  const url = `${SUPABASE_STORAGE_URL}/object/comics-images/${filePath}`;
+  
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      // Obter token fresco em cada tentativa (garante que não está expirado)
+      const token = await getAuthToken();
+      
+      console.log(`[uploadImageToStorage] Tentativa ${attempt}/${retries} para ${filePath}`);
+      console.log(`[uploadImageToStorage] Token disponível: ${!!token}`);
+      
+      // Verificar se token está expirado
+      if (token && isTokenExpired(token)) {
+        console.warn(`[uploadImageToStorage] ⚠️ Token expirado detectado, tentando refresh...`);
+        // getAuthToken já faz refresh se necessário, então obter novamente
+        const freshToken = await getAuthToken();
+        if (!freshToken) {
+          console.error(`[uploadImageToStorage] ❌ Não foi possível obter token válido`);
+        }
+      }
+      
+      const response = await fetchWithTimeout(
+        url,
+        {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token || SUPABASE_ANON_KEY}`,
+            'apikey': SUPABASE_ANON_KEY,
+            'Content-Type': blob.type || 'image/jpeg',
+            'x-upsert': 'true'
+          },
+          body: blob
+        },
+        60000 // 60s timeout
+      );
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`[uploadImageToStorage] Erro HTTP ${response.status}:`, errorText);
+        
+        // Se 401 ou 403 (token expirado/inválido), tentar com token fresco
+        if ((response.status === 401 || response.status === 403) && attempt < retries) {
+          console.warn(`[uploadImageToStorage] ${response.status} na tentativa ${attempt}, obtendo token fresco...`);
+          await new Promise(resolve => setTimeout(resolve, 1000 * attempt)); // Backoff exponencial
+          continue;
+        }
+        throw new Error(`HTTP ${response.status}: ${errorText}`);
+      }
+      
+      // Obter URL pública
+      const publicUrl = `${SUPABASE_STORAGE_URL}/object/public/comics-images/${filePath}`;
+      console.log(`[uploadImageToStorage] ✅ Upload bem-sucedido: ${filePath}`);
+      return publicUrl;
+      
+    } catch (error: any) {
+      if (attempt === retries) {
+        console.error(`[uploadImageToStorage] ❌ Falhou após ${retries} tentativas:`, error.message);
+        throw error;
+      }
+      console.warn(`[uploadImageToStorage] Tentativa ${attempt} falhou (${error.message}), tentando novamente...`);
+      await new Promise(resolve => setTimeout(resolve, 1000 * attempt)); // Backoff exponencial
+    }
+  }
+  
+  throw new Error('Upload falhou após todas as tentativas');
+};
+
+// --- REST API Helper: Upload PDF to Storage ---
+const uploadPDFToStorage = async (
+  filePath: string,
+  pdfBlob: Blob,
+  retries: number = 2
+): Promise<string> => {
+  const url = `${SUPABASE_STORAGE_URL}/object/comics-images/${filePath}`;
+  
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      // Obter token fresco em cada tentativa (garante que não está expirado)
+      const token = await getAuthToken();
+      
+      console.log(`[uploadPDFToStorage] Tentativa ${attempt}/${retries} para ${filePath} (${(pdfBlob.size / 1024 / 1024).toFixed(2)} MB)`);
+      console.log(`[uploadPDFToStorage] Token disponível: ${!!token}`);
+      
+      // Verificar se token está expirado
+      if (token && isTokenExpired(token)) {
+        console.warn(`[uploadPDFToStorage] ⚠️ Token expirado detectado, tentando refresh...`);
+        const freshToken = await getAuthToken();
+        if (!freshToken) {
+          console.error(`[uploadPDFToStorage] ❌ Não foi possível obter token válido`);
+        }
+      }
+      
+      const response = await fetchWithTimeout(
+        url,
+        {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token || SUPABASE_ANON_KEY}`,
+            'apikey': SUPABASE_ANON_KEY,
+            'Content-Type': 'application/pdf',
+            'x-upsert': 'true'
+          },
+          body: pdfBlob
+        },
+        120000 // 120s timeout para PDFs grandes
+      );
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`[uploadPDFToStorage] Erro HTTP ${response.status}:`, errorText);
+        
+        // Se 401 ou 403 (token expirado/inválido), tentar com token fresco
+        if ((response.status === 401 || response.status === 403) && attempt < retries) {
+          console.warn(`[uploadPDFToStorage] ${response.status} na tentativa ${attempt}, obtendo token fresco...`);
+          await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
+          continue;
+        }
+        throw new Error(`HTTP ${response.status}: ${errorText}`);
+      }
+      
+      const publicUrl = `${SUPABASE_STORAGE_URL}/object/public/comics-images/${filePath}`;
+      console.log(`[uploadPDFToStorage] ✅ PDF upload bem-sucedido: ${filePath}`);
+      return publicUrl;
+      
+    } catch (error: any) {
+      if (attempt === retries) {
+        console.error(`[uploadPDFToStorage] ❌ Falhou após ${retries} tentativas:`, error.message);
+        throw error;
+      }
+      console.warn(`[uploadPDFToStorage] Tentativa ${attempt} falhou (${error.message}), tentando novamente...`);
+      await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
+    }
+  }
+  
+  throw new Error('PDF upload falhou após todas as tentativas');
+};
+
+// --- Helper: Test Supabase Connection ---
+const testSupabaseConnection = async (): Promise<boolean> => {
+  console.log('[Test] ===== TESTANDO CONECTIVIDADE COM SUPABASE =====');
+  try {
+    const token = await getAuthToken();
+    const url = `${SUPABASE_REST_URL}/comics?limit=1`;
+    
+    console.log('[Test] URL de teste:', url);
+    console.log('[Test] Token disponível:', !!token);
+    
+    // Timeout de 3 segundos para não travar
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => {
+      console.warn('[Test] ⏱️ Timeout no teste de conectividade (3s)');
+      controller.abort();
+    }, 3000);
+    
+    const response = await fetch(url, {
+      headers: {
+        'apikey': SUPABASE_ANON_KEY,
+        'Authorization': `Bearer ${token || SUPABASE_ANON_KEY}`
+      },
+      signal: controller.signal
+    });
+    
+    clearTimeout(timeoutId);
+    
+    console.log('[Test] Status:', response.status);
+    console.log('[Test] Status Text:', response.statusText);
+    
+    if (response.ok) {
+      console.log('[Test] ✓ Conectividade OK!');
+      return true;
+    } else {
+      console.error('[Test] ❌ Falha de conectividade:', response.status);
+      const errorText = await response.text();
+      console.error('[Test] Erro:', errorText);
+      return false;
+    }
+  } catch (error: any) {
+    if (error.name === 'AbortError') {
+      console.error('[Test] ❌ Timeout no teste de conectividade');
+    } else {
+      console.error('[Test] ❌ Exceção no teste de conectividade:', error);
+    }
+    return false;
+  }
+};
+
+// --- Helper: Diagnose Database ---
+const diagnoseDatabase = async (): Promise<void> => {
+  console.log('[Diagnose] ===== DIAGNÓSTICO DO BANCO DE DADOS =====');
+  
+  try {
+    // Teste 1: Tabela comics existe?
+    console.log('[Diagnose] Teste 1: Verificando se tabela comics existe...');
+    const { count, error: countError } = await supabase
+      .from('comics')
+      .select('*', { count: 'exact', head: true });
+    
+    if (countError) {
+      console.error('[Diagnose] ✗ Erro ao acessar tabela:', countError.message);
+    } else {
+      console.log('[Diagnose] ✓ Tabela comics existe (count:', count, ')');
+    }
+    
+    // Teste 2: User ID válido?
+    console.log('[Diagnose] Teste 2: Verificando user ID...');
+    const { data: { user }, error: userError } = await supabase.auth.getUser();
+    
+    if (userError) {
+      console.error('[Diagnose] ✗ Erro ao obter usuário:', userError.message);
+    } else if (!user) {
+      console.error('[Diagnose] ✗ Usuário não autenticado');
+    } else {
+      console.log('[Diagnose] ✓ User ID:', user.id);
+      console.log('[Diagnose] ✓ Email:', user.email);
+    }
+    
+    // Teste 3: Pode inserir?
+    console.log('[Diagnose] Teste 3: Testando insert...');
+    if (user) {
+      const testPayload = {
+        user_id: user.id,
+        hero_name: 'TEST_' + Date.now(),
+        genre: 'Test',
+        story_tone: 'Test',
+        total_pages: 1,
+        comic_data: { test: true, timestamp: Date.now() }
+      };
+      
+      console.log('[Diagnose] Payload de teste:', testPayload);
+      
+      const { data, error: insertError } = await supabase
+        .from('comics')
+        .insert(testPayload)
+        .select()
+        .single();
+      
+      if (insertError) {
+        console.error('[Diagnose] ✗ Insert bloqueado!');
+        console.error('[Diagnose] Erro:', insertError.message);
+        console.error('[Diagnose] Código:', insertError.code);
+        console.error('[Diagnose] Detalhes:', insertError.details);
+        console.error('[Diagnose] Hint:', insertError.hint);
+      } else {
+        console.log('[Diagnose] ✓ Insert permitido!');
+        console.log('[Diagnose] ✓ Comic de teste criado:', data?.id);
+        
+        // Limpar teste
+        console.log('[Diagnose] Deletando comic de teste...');
+        await supabase.from('comics').delete().eq('id', data.id);
+        console.log('[Diagnose] ✓ Comic de teste deletado');
+      }
+    }
+    
+    console.log('[Diagnose] ===== DIAGNÓSTICO COMPLETO =====');
+  } catch (e: any) {
+    console.error('[Diagnose] ✗ Erro no diagnóstico:', e);
+  }
+};
+
+// --- REST API Helper: Save Comic (INSERT) ---
+const saveComic = async (payload: any): Promise<any> => {
+  console.log('[saveComic] ===== INICIANDO SALVAMENTO =====');
+  console.log('[saveComic] Timestamp:', new Date().toISOString());
+  
+  const url = `${SUPABASE_REST_URL}/comics`;
+  console.log('[saveComic] URL:', url);
+  console.log('[saveComic] Payload size:', JSON.stringify(payload).length, 'bytes');
+  console.log('[saveComic] Payload preview:', JSON.stringify(payload).substring(0, 500) + '...');
+  console.log('[saveComic] Payload keys:', Object.keys(payload).join(', '));
+  
+  // Tentar obter token com timeout de 1s
+  console.log('[saveComic] Obtendo token (timeout 1s)...');
+  let token: string | null = null;
+  
+  try {
+    const tokenPromise = getAuthToken();
+    const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 1000));
+    token = await Promise.race([tokenPromise, timeoutPromise]);
+    console.log('[saveComic] Token obtido:', !!token);
+  } catch (err) {
+    console.warn('[saveComic] Erro ao obter token (não-crítico):', err);
+  }
+  
+  // RLS ESTÁ DESABILITADO - podemos usar apenas ANON_KEY sem token de usuário
+  if (!token) {
+    console.warn('[saveComic] ⚠️ Usando apenas ANON_KEY (RLS desabilitado, token não necessário)');
+  }
+  
+  try {
+    console.log('[saveComic] Enviando requisição POST...', new Date().toISOString());
+    console.log('[saveComic] Headers:', {
+      'Content-Type': 'application/json',
+      'apikey': SUPABASE_ANON_KEY.substring(0, 20) + '...',
+      'Authorization': token ? `Bearer ${token.substring(0, 20)}...` : `Bearer ${SUPABASE_ANON_KEY.substring(0, 20)}...`,
+      'Prefer': 'return=representation'
+    });
+    
+    const response = await fetchWithTimeout(
+      url,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': SUPABASE_ANON_KEY,
+          // Se RLS desabilitado, ANON_KEY é suficiente
+          'Authorization': `Bearer ${token || SUPABASE_ANON_KEY}`,
+          'Prefer': 'return=representation'
+        },
+        body: JSON.stringify(payload)
+      },
+      5000 // 5s timeout
+    );
+    
+    console.log('[saveComic] Response recebida!');
+    console.log('[saveComic] Status:', response.status);
+    console.log('[saveComic] Status Text:', response.statusText);
+    console.log('[saveComic] Headers:', JSON.stringify([...response.headers.entries()]));
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('[saveComic] ❌ Erro HTTP:', response.status);
+      console.error('[saveComic] Erro texto completo:', errorText);
+      console.error('[saveComic] Tentando parsear erro como JSON...');
+      
+      try {
+        const errorJson = JSON.parse(errorText);
+        console.error('[saveComic] Erro JSON:', errorJson);
+      } catch {
+        console.error('[saveComic] Erro não é JSON válido');
+      }
+      
+      // Se 401 ou 403, obter token fresco e tentar novamente
+      if (response.status === 401 || response.status === 403) {
+        console.warn('[saveComic] 401/403 - Tentando obter token fresco...');
+        
+        let freshToken: string | null = null;
+        try {
+          const tokenPromise = getAuthToken();
+          const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 1000));
+          freshToken = await Promise.race([tokenPromise, timeoutPromise]);
+          console.log('[saveComic] Token fresco obtido:', !!freshToken);
+        } catch (err) {
+          console.warn('[saveComic] Erro ao obter token fresco:', err);
+        }
+        console.log('[saveComic] Tentando retry com novo token...');
+        const retryResponse = await fetchWithTimeout(
+          url,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'apikey': SUPABASE_ANON_KEY,
+              'Authorization': `Bearer ${freshToken || SUPABASE_ANON_KEY}`,
+              'Prefer': 'return=representation'
+            },
+            body: JSON.stringify(payload)
+          },
+          5000 // 5s timeout
+        );
+        
+        console.log('[saveComic] Retry response status:', retryResponse.status);
+        
+        if (!retryResponse.ok) {
+          const retryErrorText = await retryResponse.text();
+          console.error('[saveComic] ❌ Retry também falhou:', retryResponse.status);
+          console.error('[saveComic] Retry erro:', retryErrorText);
+          throw new Error(`HTTP ${retryResponse.status}: ${retryErrorText}`);
+        }
+        
+        console.log('[saveComic] ✓ Retry bem-sucedido! Parseando resposta...');
+        let data = await retryResponse.json();
+        console.log('[saveComic] Data recebida (retry):', data);
+        console.log('[saveComic] Data é array?', Array.isArray(data));
+        
+        if (Array.isArray(data) && data.length > 0) {
+          console.log('[saveComic] Extraindo primeiro item do array');
+          data = data[0];
+        } else if (Array.isArray(data) && data.length === 0) {
+          console.error('[saveComic] ❌ ERRO: Array vazio retornado!');
+          throw new Error('Nenhum dado retornado do insert (array vazio)');
+        }
+        
+        console.log('[saveComic] ✓ Dados finais (retry):', data);
+        console.log('[saveComic] ✓ ID do comic salvo:', data?.id);
+        return data;
+      }
+      throw new Error(`HTTP ${response.status}: ${errorText}`);
+    }
+    
+    console.log('[saveComic] ✓ Response OK! Parseando resposta...');
+    let data;
+    try {
+      data = await response.json();
+      console.log('[saveComic] Data parseada:', data);
+      console.log('[saveComic] Data tipo:', typeof data);
+      console.log('[saveComic] Data é array?', Array.isArray(data));
+    } catch (parseError) {
+      console.error('[saveComic] ❌ Erro ao parsear JSON:', parseError);
+      throw new Error('Erro ao parsear resposta JSON do servidor');
+    }
+    
+    if (Array.isArray(data) && data.length > 0) {
+      console.log('[saveComic] Extraindo primeiro item do array (length:', data.length, ')');
+      data = data[0];
+    } else if (Array.isArray(data) && data.length === 0) {
+      console.error('[saveComic] ❌ ERRO: Array vazio retornado!');
+      throw new Error('Nenhum dado retornado do insert (array vazio)');
+    }
+    
+    console.log('[saveComic] ===== SALVAMENTO CONCLUÍDO =====');
+    console.log('[saveComic] ✓ Comic ID:', data?.id);
+    console.log('[saveComic] ✓ Data completa:', data);
+    return data;
+    
+  } catch (error: any) {
+    console.error('[saveComic] ===== ERRO NO SALVAMENTO =====');
+    console.error('[saveComic] Erro tipo:', typeof error);
+    console.error('[saveComic] Erro mensagem:', error.message);
+    console.error('[saveComic] Erro stack:', error.stack);
+    console.error('[saveComic] Erro completo:', error);
+    throw error;
+  }
+};
+
+// --- REST API Helper: Update Comic (PATCH) ---
+const updateComic = async (comicId: string, updates: Record<string, any>): Promise<void> => {
+  const token = await getAuthToken();
+  const url = `${SUPABASE_REST_URL}/comics?id=eq.${comicId}`;
+  
+  console.log('[updateComic] Token disponível:', !!token);
+  
+  try {
+    const response = await fetchWithTimeout(
+      url,
+      {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': SUPABASE_ANON_KEY,
+          'Authorization': `Bearer ${token || SUPABASE_ANON_KEY}`,
+          'Prefer': 'return=minimal'
+        },
+        body: JSON.stringify(updates)
+      },
+      10000 // 10s timeout
+    );
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('[updateComic] Erro HTTP:', response.status, errorText);
+      // Se 401 ou 403, obter token fresco e tentar novamente
+      if ((response.status === 401 || response.status === 403) && token) {
+        console.warn('[updateComic] Token expirado/inválido, obtendo token fresco...');
+        const freshToken = await getAuthToken();
+        const retryResponse = await fetchWithTimeout(
+          url,
+          {
+            method: 'PATCH',
+            headers: {
+              'Content-Type': 'application/json',
+              'apikey': SUPABASE_ANON_KEY,
+              'Authorization': `Bearer ${freshToken || SUPABASE_ANON_KEY}`,
+              'Prefer': 'return=minimal'
+            },
+            body: JSON.stringify(updates)
+          },
+          10000
+        );
+        
+        if (!retryResponse.ok) {
+          const retryErrorText = await retryResponse.text();
+          throw new Error(`HTTP ${retryResponse.status}: ${retryErrorText}`);
+        }
+        return;
+      }
+      throw new Error(`HTTP ${response.status}: ${errorText}`);
+    }
+    
+  } catch (error: any) {
+    console.error('[updateComic] Erro:', error);
+    throw error;
+  }
+};
+
 // --- Components ---
 
 const LogoText = ({ size = "text-2xl" }: { size?: string }) => (
@@ -95,6 +743,7 @@ const App: React.FC = () => {
   const [credits, setCredits] = useState(4);
   const [isGenerating, setIsGenerating] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [savingStatus, setSavingStatus] = useState<string | null>(null);
 
   // --- Story State ---
   const [hero, setHeroState] = useState<Persona | null>(null);
@@ -150,36 +799,70 @@ const App: React.FC = () => {
   // --- Authentication Effects ---
   useEffect(() => {
     let isMounted = true;
+    console.log('[Auth] ===== INICIANDO VERIFICAÇÃO DE AUTENTICAÇÃO =====');
+    console.log('[Auth] Timestamp:', new Date().toISOString());
+    const startTime = Date.now();
     
-    // Timeout de segurança para garantir que authLoading seja desativado
+    // Timeout AGRESSIVO de 2s
     const timeoutId = setTimeout(() => {
       if (isMounted) {
-        console.warn('[Auth] Timeout na verificação de autenticação - desativando loading');
-        console.warn('[Auth] Isso pode indicar problema de conexão com Supabase ou credenciais inválidas');
+        console.warn('[Auth] ⏱️ TIMEOUT (2s) na verificação de autenticação');
+        console.warn('[Auth] Continuando SEM autenticação (app funciona mesmo assim)');
         setAuthLoading(false);
         if (!user) {
-          setShowLanding(true);
+          setShowLanding(false); // Permitir acesso ao app sem auth
           setShowLogin(false);
         }
       }
-    }, 10000); // Aumentado para 10 segundos para dar mais tempo
+    }, 2000); // Reduzido para 2s
 
-    // Verificar sessão atual
-    supabase.auth.getSession()
-      .then(async ({ data: { session }, error }) => {
+    // Verificar sessão atual COM timeout manual
+    const sessionPromise = supabase.auth.getSession();
+    const manualTimeoutPromise = new Promise<null>((resolve) => {
+      setTimeout(() => {
+        console.error('[Auth] ⏱️ getSession travou (2s)!');
+        resolve(null);
+      }, 2000);
+    });
+    
+    Promise.race([sessionPromise, manualTimeoutPromise])
+      .then(async (result) => {
         if (!isMounted) return;
         
-        if (error) {
-          console.error('Erro ao verificar sessão:', error);
+        console.log('[Auth] ⏱️ getSession levou:', Date.now() - startTime, 'ms');
+        
+        if (!result) {
+          console.warn('[Auth] ⚠️ getSession travou, continuando sem auth');
           setAuthLoading(false);
           setUser(null);
-          setShowLanding(true);
+          setShowLanding(false);
           setShowLogin(false);
+          clearTimeout(timeoutId);
+          return;
+        }
+        
+        const { data: { session }, error } = result;
+        
+        if (error) {
+          console.error('[Auth] ❌ Erro ao verificar sessão:', error);
+          setAuthLoading(false);
+          setUser(null);
+          setShowLanding(false); // Permitir acesso sem auth
+          setShowLogin(false);
+          clearTimeout(timeoutId);
           return;
         }
 
         if (session?.user) {
+          console.log('[Auth] ✅ Usuário autenticado:', {
+            id: session.user.id,
+            email: session.user.email,
+            hasToken: !!session.access_token
+          });
+          console.log('[Auth] Token no localStorage:', localStorage.getItem('sb-nxorwtmtgxvpqmrwhvdx-auth-token'));
+          
           setUser(session.user);
+          console.log('[Auth] ✓ User setado no estado:', session.user.id);
           setShowLanding(false);
           setShowLogin(false);
           // Carregar créditos do perfil
@@ -197,11 +880,13 @@ const App: React.FC = () => {
             // Continuar mesmo se falhar ao carregar créditos
           }
         } else {
+          console.log('[Auth] ⚠️ Nenhuma sessão encontrada');
           setUser(null);
-          setShowLanding(true);
+          setShowLanding(false); // Permitir acesso ao app mesmo sem auth
           setShowLogin(false);
         }
         setAuthLoading(false);
+        console.log('[Auth] ===== VERIFICAÇÃO COMPLETA =====');
         clearTimeout(timeoutId);
       })
       .catch((err) => {
@@ -221,6 +906,12 @@ const App: React.FC = () => {
       if (!isMounted) return;
       
       if (session?.user) {
+        console.log('[Auth] onAuthStateChange - Usuário autenticado:', {
+          id: session.user.id,
+          email: session.user.email,
+          hasToken: !!session.access_token
+        });
+        
         setUser(session.user);
         setShowLanding(false);
         setShowLogin(false);
@@ -277,14 +968,11 @@ const App: React.FC = () => {
 
   // --- AI Helpers ---
   const getAI = () => {
-    // Tentar obter API key de diferentes fontes
-    const apiKey = (process.env as any)?.API_KEY || 
-                   (process.env as any)?.GEMINI_API_KEY ||
-                   (import.meta as any).env?.GEMINI_API_KEY ||
-                   (window as any).__GEMINI_API_KEY__;
+    // Buscar API key do .env via process.env.GEMINI_API_KEY (injetado pelo Vite)
+    const apiKey = (process.env as any)?.GEMINI_API_KEY;
     
     if (!apiKey) {
-      throw new Error('API Key não encontrada. Por favor, configure a chave da API do Gemini.');
+      throw new Error('API Key não encontrada. Por favor, configure a chave GEMINI_API_KEY no arquivo .env');
     }
     
     return new GoogleGenAI({ apiKey });
@@ -1935,133 +2623,190 @@ PANEL DESCRIPTIONS:
 
               // PASSO 1: Salvar dados básicos (SEMPRE funciona)
               console.log('[launchStory] PASSO 1: Salvando dados básicos...');
+              console.log('[launchStory] User atual:', {
+                id: user?.id,
+                email: user?.email,
+                isAuthenticated: !!user
+              });
               
-              const basicInsertPayload = {
+              // Payload mínimo primeiro (essencial apenas)
+              const minimalPayload = {
                 user_id: user.id,
-                hero_name: heroName,
-                genre: selectedGenre,
-                story_tone: storyTone,
-                total_pages: basicComicData.totalPages,
+                hero_name: heroName || 'Untitled',
+                genre: selectedGenre || 'Adventure',
+                total_pages: basicComicData.totalPages || 0
+              };
+              
+              // Payload completo (com campos opcionais)
+              const basicInsertPayload = {
+                ...minimalPayload,
+                story_tone: storyTone || null,
                 comic_data: basicComicData, // Só dados básicos, sem imagens
                 series_id: seriesId || null,
                 part_number: comicType === 'series' ? partNumber : null,
-                is_series_part: comicType === 'series'
+                is_series_part: comicType === 'series' || false
               };
               
-              console.log('[launchStory] Payload básico:', JSON.stringify(basicInsertPayload).length, 'bytes');
-              console.log('[launchStory] Dados do payload:', {
+              console.log('[launchStory] Payload mínimo:', JSON.stringify(minimalPayload).length, 'bytes');
+              console.log('[launchStory] Payload completo:', JSON.stringify(basicInsertPayload).length, 'bytes');
+              console.log('[launchStory] Dados do payload completo:', {
                 user_id: basicInsertPayload.user_id,
                 hero_name: basicInsertPayload.hero_name,
                 genre: basicInsertPayload.genre,
                 total_pages: basicInsertPayload.total_pages,
+                story_tone: basicInsertPayload.story_tone,
+                has_comic_data: !!basicInsertPayload.comic_data,
                 series_id: basicInsertPayload.series_id,
                 part_number: basicInsertPayload.part_number,
                 is_series_part: basicInsertPayload.is_series_part
               });
               
-              // Verificar autenticação do Supabase
-              const { data: { user: supabaseUser }, error: authError } = await supabase.auth.getUser();
-              console.log('[launchStory] Verificação de auth:', {
-                supabaseUser: supabaseUser?.id,
-                authError: authError?.message,
-                userIdMatch: supabaseUser?.id === user.id
-              });
-              
-              // Teste simples de insert para debug
-              console.log('[launchStory] Testando insert simples...');
-              try {
-                const testPayload = {
-                  user_id: user.id,
-                  hero_name: 'Teste',
-                  genre: 'Teste',
-                  story_tone: 'Teste',
-                  total_pages: 1,
-                  comic_data: { test: true }
-                };
-                
-                const { data: testData, error: testError } = await supabase
-                  .from('comics')
-                  .insert(testPayload)
-                  .select()
-                  .single();
-                
-                console.log('[launchStory] Teste insert resultado:', { testData, testError });
-                
-                // Se o teste funcionou, deletar o registro de teste
-                if (testData && !testError) {
-                  await supabase.from('comics').delete().eq('id', testData.id);
-                  console.log('[launchStory] Registro de teste deletado');
-                }
-              } catch (testException) {
-                console.error('[launchStory] Exceção no teste:', testException);
-              }
+              console.log('[launchStory] Salvando dados básicos via saveComic...');
               
               let savedComic;
               try {
-                console.log('[launchStory] Iniciando INSERT no Supabase...');
+                setSavingStatus('💾 Salvando gibi no banco de dados...');
+                console.log('[launchStory] Chamando saveComic com payload básico...');
+                console.log('[launchStory] Timestamp:', new Date().toISOString());
+                savedComic = await saveComic(basicInsertPayload);
+                console.log('[launchStory] ✅ Dados básicos salvos via REST API!');
+                console.log('[launchStory] ✅ Comic ID:', savedComic?.id);
+                console.log('[launchStory] Timestamp:', new Date().toISOString());
+                setSavingStatus('✅ Gibi salvo com sucesso!');
                 
-                // Adicionar timeout para evitar travamento
-                const insertPromise = supabase
-                  .from('comics')
-                  .insert(basicInsertPayload)
-                  .select()
-                  .single();
-                
-                const timeoutPromise = new Promise((_, reject) => 
-                  setTimeout(() => reject(new Error('Timeout ao salvar no banco (30s)')), 30000)
-                );
-                
-                console.log('[launchStory] Aguardando resposta do Supabase...');
-                const { data, error: saveError } = await Promise.race([
-                  insertPromise,
-                  timeoutPromise
-                ]) as any;
-                
-                console.log('[launchStory] Resposta recebida do Supabase');
-                console.log('[launchStory] Data:', data);
-                console.log('[launchStory] Error:', saveError);
-                
-                if (saveError) {
-                  console.error('[launchStory] ERRO ao salvar dados básicos:', saveError);
-                  console.error('[launchStory] Detalhes do erro:', {
-                    code: saveError.code,
-                    message: saveError.message,
-                    details: saveError.details,
-                    hint: saveError.hint
-                  });
-                  setErrorMessage(`Erro ao salvar gibi: ${saveError.message}. Você ainda pode visualizá-lo e fazer download.`);
-                  return;
-                }
-                
-                if (!data) {
+                if (!savedComic || !savedComic.id) {
                   console.error('[launchStory] ERRO: Nenhum dado retornado do insert');
+                  setSavingStatus(null);
                   setErrorMessage('Erro ao salvar gibi: Nenhum dado retornado. Você ainda pode visualizá-lo e fazer download.');
                   return;
                 }
-                
-                savedComic = data;
-                console.log('[launchStory] ✅ Dados básicos salvos! ID:', savedComic.id);
               } catch (insertError) {
+                console.error('[launchStory] ===== ERRO NO INSERT VIA REST API =====');
                 console.error('[launchStory] EXCEÇÃO ao salvar dados básicos:', insertError);
-                console.error('[launchStory] Tipo do erro:', typeof insertError);
-                console.error('[launchStory] Stack trace:', insertError instanceof Error ? insertError.stack : 'N/A');
                 
-                if (insertError instanceof Error && insertError.message.includes('Timeout')) {
-                  setErrorMessage('Timeout ao salvar gibi. Verifique sua conexão e tente novamente.');
-                } else {
-                  setErrorMessage(`Erro ao salvar gibi: ${insertError instanceof Error ? insertError.message : String(insertError)}. Você ainda pode visualizá-lo e fazer download.`);
+                // FALLBACK 1: Tentar com payload completo via Supabase Client
+                setSavingStatus('🔄 Tentando método alternativo...');
+                console.log('[launchStory] ===== FALLBACK 1: Supabase Client (payload completo) =====');
+                try {
+                  console.log('[launchStory] Usando Supabase Client ao invés de REST API...');
+                  const { data, error } = await supabase
+                    .from('comics')
+                    .insert(basicInsertPayload)
+                    .select()
+                    .single();
+                  
+                  if (error) {
+                    console.error('[launchStory] ❌ Fallback 1 falhou:', error);
+                    console.error('[launchStory] Erro message:', error.message);
+                    console.error('[launchStory] Erro code:', error.code);
+                    
+                    // FALLBACK 2: Tentar com payload mínimo
+                    setSavingStatus('🔄 Tentando com dados simplificados...');
+                    console.log('[launchStory] ===== FALLBACK 2: Payload Mínimo =====');
+                    console.log('[launchStory] Tentando com apenas campos essenciais...');
+                    
+                    const { data: minData, error: minError } = await supabase
+                      .from('comics')
+                      .insert(minimalPayload)
+                      .select()
+                      .single();
+                    
+                    if (minError) {
+                      console.error('[launchStory] ❌ Fallback 2 também falhou:', minError);
+                      console.error('[launchStory] Erro message:', minError.message);
+                      console.error('[launchStory] Erro code:', minError.code);
+                      console.error('[launchStory] Erro details:', minError.details);
+                      console.error('[launchStory] Erro hint:', minError.hint);
+                      
+                      // Executar diagnóstico completo (em background, não bloqueia)
+                      setSavingStatus('🔍 Diagnosticando problema...');
+                      console.log('[launchStory] Executando diagnóstico completo...');
+                      diagnoseDatabase().catch(err => console.warn('[launchStory] Diagnóstico falhou:', err));
+                      
+                      setSavingStatus(null);
+                      if (insertError instanceof Error && insertError.message.includes('Timeout')) {
+                        setErrorMessage('⏱️ Timeout ao salvar gibi. Verifique sua conexão e tente novamente.');
+                      } else {
+                        setErrorMessage(`❌ Erro ao salvar gibi (todos os métodos falharam): ${minError.message}. Abra o console (F12) para ver detalhes técnicos.`);
+                      }
+                      return;
+                    }
+                    
+                    console.log('[launchStory] ✅ Fallback 2 bem-sucedido! Comic salvo com payload mínimo');
+                    setSavingStatus('✅ Gibi salvo (método simplificado)!');
+                    savedComic = minData;
+                    console.log('[launchStory] ✅ Comic ID:', savedComic?.id);
+                    
+                    // Atualizar com dados completos depois
+                    console.log('[launchStory] Atualizando com dados completos...');
+                    try {
+                      const { error: updateError } = await supabase
+                        .from('comics')
+                        .update({
+                          story_tone: storyTone,
+                          comic_data: basicComicData,
+                          series_id: seriesId,
+                          part_number: partNumber,
+                          is_series_part: comicType === 'series'
+                        })
+                        .eq('id', savedComic.id);
+                      
+                      if (updateError) {
+                        console.warn('[launchStory] ⚠️ Erro ao atualizar dados completos (não crítico):', updateError);
+                      } else {
+                        console.log('[launchStory] ✓ Dados completos atualizados');
+                      }
+                    } catch (updateErr) {
+                      console.warn('[launchStory] ⚠️ Exceção ao atualizar (não crítico):', updateErr);
+                    }
+                    
+                    // Não retornar - continuar com o fluxo
+                  } else {
+                    console.log('[launchStory] ✅ Fallback 1 bem-sucedido! Comic salvo via Supabase Client');
+                    setSavingStatus('✅ Gibi salvo (método alternativo)!');
+                    savedComic = data;
+                    console.log('[launchStory] ✅ Comic ID:', savedComic?.id);
+                  }
+                  
+                  console.log('[launchStory] ✅ Fallback bem-sucedido! Comic salvo via Supabase Client');
+                  savedComic = data;
+                  console.log('[launchStory] ✅ Comic ID:', savedComic?.id);
+                } catch (fallbackError) {
+                  console.error('[launchStory] ❌ Fallback também falhou:', fallbackError);
+                  
+                  // Executar diagnóstico completo
+                  console.log('[launchStory] Executando diagnóstico completo...');
+                  await diagnoseDatabase();
+                  
+                  setErrorMessage(`Erro crítico ao salvar gibi (ambos REST e Client falharam). Verifique o console para detalhes técnicos.`);
+                  return;
                 }
-                return;
               }
               
-              // PASSO 2: Upload de imagens individuais (em background)
+              // PASSO 2: Upload de imagens individuais (sequencial, aguardando conclusão)
+              setSavingStatus(`📤 Fazendo upload de ${facesWithImages.length} imagens...`);
               console.log('[launchStory] PASSO 2: Fazendo upload das imagens...');
               console.log('[launchStory] Faces que serão processadas:', facesWithImages.length);
+              console.log('[launchStory] Executando uploadImagesInBackground...');
+              console.log('[launchStory] User ID:', user?.id);
+              console.log('[launchStory] Comic ID:', savedComic.id);
+              console.log('[launchStory] Faces count:', allGeneratedFaces.length);
               
-              // Usar setTimeout para não bloquear a UI
-              setTimeout(() => {
-                uploadImagesInBackground(savedComic.id, allGeneratedFaces);
-              }, 100);
+              try {
+                await uploadImagesInBackground(savedComic.id, allGeneratedFaces);
+                console.log('[launchStory] ✅ Upload de imagens concluído');
+                setSavingStatus('✅ Imagens salvas com sucesso!');
+                
+                // Limpar status após 3 segundos
+                setTimeout(() => setSavingStatus(null), 3000);
+              } catch (error) {
+                console.error('[launchStory] ❌ Erro no upload de imagens:', error);
+                setSavingStatus('⚠️ Algumas imagens não foram salvas');
+                
+                // Limpar status após 3 segundos
+                setTimeout(() => setSavingStatus(null), 3000);
+                // Continuar mesmo se upload falhar parcialmente - base64 ainda está no comic_data
+              }
               
               // Atualizar contador de gibis
               setTotalComics(prev => prev + 1);
@@ -2148,6 +2893,12 @@ PANEL DESCRIPTIONS:
     try {
       console.log('[generateAndUploadPDFWithFaces] Iniciando geração de PDF...');
       console.log('[generateAndUploadPDFWithFaces] Faces recebidas:', faces.length);
+      console.log('[generateAndUploadPDFWithFaces] Usuário atual:', user?.id);
+      
+      if (!user) {
+        console.error('[generateAndUploadPDFWithFaces] Usuário não autenticado');
+        return null;
+      }
       
       // Filtrar e ordenar as páginas corretamente
       const sortedFaces = faces
@@ -2245,49 +2996,30 @@ PANEL DESCRIPTIONS:
         ? `SuperKids_${seriesTitle}_Parte${seriesPartNum}.pdf`
         : `SuperKids_${heroName || 'Comic'}.pdf`;
 
-      // Fazer upload para storage
+      // Fazer upload para storage via REST API
       const filePath = `${user.id}/pdfs/${crypto.randomUUID()}_${fileName}`;
       console.log(`[generateAndUploadPDFWithFaces] Fazendo upload para: ${filePath}`);
       console.log(`[generateAndUploadPDFWithFaces] Tamanho do arquivo: ${(pdfBlob.size / 1024 / 1024).toFixed(2)} MB`);
 
-      // Adicionar logs de progresso
-      const progressInterval = setInterval(() => {
-        console.log('[generateAndUploadPDFWithFaces] Upload em progresso... (aguarde até 90s)');
-      }, 10000); // Log a cada 10 segundos
-
-      const uploadPromise = supabase.storage
-        .from('comics-images')
-        .upload(filePath, pdfBlob, {
-          contentType: 'application/pdf',
-          upsert: true
-        });
-
-      const timeoutPromise = new Promise((_, reject) => 
-        setTimeout(() => {
-          clearInterval(progressInterval);
-          reject(new Error('Timeout no upload do PDF (90s)'));
-        }, 90000)
-      );
-
-      const { data: uploadData, error: uploadError } = await Promise.race([
-        uploadPromise,
-        timeoutPromise
-      ]) as any;
-
-      clearInterval(progressInterval); // Limpar interval quando terminar
-
-      if (uploadError) {
+      try {
+        // Usar uploadPDFToStorage (REST API) com retry automático
+        const publicUrl = await uploadPDFToStorage(filePath, pdfBlob, 2);
+        console.log('[generateAndUploadPDFWithFaces] PDF enviado para storage:', publicUrl);
+        return publicUrl;
+      } catch (uploadError: any) {
         console.error('[generateAndUploadPDFWithFaces] Erro ao fazer upload do PDF:', uploadError);
+        // Logs específicos de erro
+        if (uploadError.message?.includes('401')) {
+          console.error('[generateAndUploadPDFWithFaces] Erro 401: Token de autenticação inválido ou expirado');
+        } else if (uploadError.message?.includes('403')) {
+          console.error('[generateAndUploadPDFWithFaces] Erro 403: Sem permissão para fazer upload');
+        } else if (uploadError.message?.includes('Timeout')) {
+          console.error('[generateAndUploadPDFWithFaces] Erro: Timeout no upload (120s)');
+        } else if (uploadError.message?.includes('Network')) {
+          console.error('[generateAndUploadPDFWithFaces] Erro: Problema de rede');
+        }
         return null;
       }
-
-      // Obter URL pública
-      const { data: urlData } = supabase.storage
-        .from('comics-images')
-        .getPublicUrl(filePath);
-
-      console.log('[generateAndUploadPDFWithFaces] PDF enviado para storage:', urlData.publicUrl);
-      return urlData.publicUrl;
 
     } catch (error) {
       console.error('[generateAndUploadPDFWithFaces] Erro ao gerar/fazer upload do PDF:', error);
@@ -2300,19 +3032,28 @@ PANEL DESCRIPTIONS:
     return generateAndUploadPDFWithFaces(comicFaces);
   };
 
-  // Função para fazer upload das imagens individuais em background
+  // Função para fazer upload das imagens individuais via REST API
   const uploadImagesInBackground = async (comicId: string, faces: ComicFace[]) => {
-    console.log('[uploadImagesInBackground] Iniciando upload de', faces.length, 'imagens...');
+    console.log('[uploadImagesInBackground] ===== INICIANDO UPLOAD DE IMAGENS VIA REST API =====');
+    console.log('[uploadImagesInBackground] Total de faces:', faces.length);
+    console.log('[uploadImagesInBackground] User ID:', user?.id);
+    console.log('[uploadImagesInBackground] Comic ID:', comicId);
+    
+    if (!user?.id) {
+      console.error('[uploadImagesInBackground] ❌ Usuário não autenticado!');
+      return;
+    }
     
     try {
       const imageUpdates: Record<string, string> = {};
       let successCount = 0;
       let failCount = 0;
       
+      // Processar imagens sequencialmente (evitar sobrecarga)
       for (const face of faces) {
         if (!face.imageUrl || !face.imageUrl.startsWith('data:')) {
           console.log(`[uploadImagesInBackground] Pulando ${face.type} (página ${face.pageIndex}) - sem imagem válida`);
-          continue; // Pular se não é base64
+          continue;
         }
         
         try {
@@ -2332,11 +3073,11 @@ PANEL DESCRIPTIONS:
             continue;
           }
           
-          // Fazer upload para storage
+          // Construir filePath
           const fileName = `${comicId}/${face.type}-${face.pageIndex || face.id}.jpg`;
-          const filePath = `${user!.id}/comics/${fileName}`;
+          const filePath = `${user.id}/comics/${fileName}`;
           
-          console.log(`[uploadImagesInBackground] Uploading ${columnName}...`);
+          console.log(`[uploadImagesInBackground] Processando ${columnName}...`);
           
           // Converter base64 para blob
           const base64Data = resizedImage.split(',')[1];
@@ -2348,69 +3089,79 @@ PANEL DESCRIPTIONS:
           const byteArray = new Uint8Array(byteNumbers);
           const blob = new Blob([byteArray], { type: 'image/jpeg' });
           
-          // Upload com timeout menor (individual)
-          const uploadPromise = supabase.storage
-            .from('comics-images')
-            .upload(filePath, blob, {
-              contentType: 'image/jpeg',
-              upsert: true
-            });
+          // Upload via REST API (com retry automático)
+          const publicUrl = await uploadImageToStorage(filePath, blob);
           
-          const timeoutPromise = new Promise((_, reject) => 
-            setTimeout(() => reject(new Error('Timeout')), 30000)
-          );
+          imageUpdates[columnName] = publicUrl;
+          successCount++;
+          console.log(`[uploadImagesInBackground] ✅ ${columnName} uploaded: ${publicUrl.substring(0, 50)}...`);
           
-          const { data: uploadData, error: uploadError } = await Promise.race([
-            uploadPromise,
-            timeoutPromise
-          ]) as any;
-          
-          if (uploadError) {
-            console.error(`[uploadImagesInBackground] Erro no upload de ${columnName}:`, uploadError);
-            failCount++;
-            continue;
+          // Atualizar banco imediatamente após cada upload bem-sucedido
+          try {
+            await updateComic(comicId, { [columnName]: publicUrl });
+            console.log(`[uploadImagesInBackground] ✅ ${columnName} URL atualizada no banco`);
+          } catch (updateErr) {
+            console.error(`[uploadImagesInBackground] ⚠️ Erro ao atualizar ${columnName} no banco:`, updateErr);
+            // Continuar mesmo se atualização falhar - URL já está em imageUpdates
           }
           
-          // Obter URL pública
-          const { data: urlData } = supabase.storage
-            .from('comics-images')
-            .getPublicUrl(filePath);
-          
-          imageUpdates[columnName] = urlData.publicUrl;
-          successCount++;
-          console.log(`[uploadImagesInBackground] ✅ ${columnName} uploaded`);
-          
-        } catch (error) {
-          console.error(`[uploadImagesInBackground] Erro ao processar imagem:`, error);
+        } catch (error: any) {
+          console.error(`[uploadImagesInBackground] ❌ Erro ao processar ${face.type} (página ${face.pageIndex}):`, error.message);
+          // Logs específicos de erro
+          if (error.message?.includes('401')) {
+            console.error(`[uploadImagesInBackground] Erro 401: Token de autenticação inválido ou expirado para ${face.type}`);
+          } else if (error.message?.includes('403')) {
+            console.error(`[uploadImagesInBackground] Erro 403: Sem permissão para fazer upload de ${face.type}`);
+          } else if (error.message?.includes('Timeout')) {
+            console.error(`[uploadImagesInBackground] Erro: Timeout no upload de ${face.type} (60s)`);
+          } else if (error.message?.includes('Network') || error.name === 'NetworkError') {
+            console.error(`[uploadImagesInBackground] Erro: Problema de rede ao fazer upload de ${face.type}`);
+          }
           failCount++;
+          // Continuar com próxima imagem mesmo se esta falhar - base64 ainda está no comic_data como fallback
         }
       }
       
-      // Atualizar banco com URLs das imagens
+      // Atualização final em batch (caso alguma atualização individual tenha falhado)
       if (Object.keys(imageUpdates).length > 0) {
-        console.log('[uploadImagesInBackground] Atualizando banco com URLs...');
-        const { error: updateError } = await supabase
-          .from('comics')
-          .update(imageUpdates)
-          .eq('id', comicId);
-        
-        if (updateError) {
-          console.error('[uploadImagesInBackground] Erro ao atualizar URLs:', updateError);
-        } else {
-          console.log(`[uploadImagesInBackground] ✅ ${Object.keys(imageUpdates).length} URLs atualizadas no banco`);
+        console.log('[uploadImagesInBackground] Atualização final em batch:', Object.keys(imageUpdates).length, 'URLs');
+        try {
+          await updateComic(comicId, imageUpdates);
+          console.log(`[uploadImagesInBackground] ✅ Batch update concluído`);
+        } catch (err) {
+          console.error('[uploadImagesInBackground] ⚠️ Erro no batch update:', err);
         }
       }
       
-      console.log(`[uploadImagesInBackground] Concluído: ${successCount} sucessos, ${failCount} falhas`);
+      console.log(`[uploadImagesInBackground] ===== CONCLUÍDO: ${successCount} sucessos, ${failCount} falhas =====`);
       
-      // PASSO 3: Tentar gerar PDF (opcional)
-      if (successCount > 0) {
+      // Se storage falhar completamente, manter base64 no comic_data como fallback
+      if (successCount === 0 && failCount > 0) {
+        console.warn('[uploadImagesInBackground] ⚠️ ATENÇÃO: Nenhuma imagem foi salva no storage. Base64 permanece no comic_data como fallback.');
+        // Nota: O comic_data já contém as imagens em base64, então o gibi ainda pode ser visualizado
+      }
+      
+      // PASSO 3: Tentar gerar PDF (opcional) - só se pelo menos 50% das imagens foram salvas
+      if (successCount > 0 && successCount >= faces.filter(f => f.imageUrl?.startsWith('data:')).length * 0.5) {
         console.log('[uploadImagesInBackground] PASSO 3: Tentando gerar PDF...');
         await generatePDFInBackground(comicId, faces);
+      } else {
+        console.warn('[uploadImagesInBackground] PDF não será gerado - muitas imagens falharam');
       }
       
-    } catch (error) {
-      console.error('[uploadImagesInBackground] Erro geral:', error);
+    } catch (error: any) {
+      console.error('[uploadImagesInBackground] ❌ Erro geral:', error);
+      // Logs específicos de erro geral
+      if (error.message?.includes('401')) {
+        console.error('[uploadImagesInBackground] Erro 401: Token de autenticação inválido ou expirado');
+      } else if (error.message?.includes('403')) {
+        console.error('[uploadImagesInBackground] Erro 403: Sem permissão para fazer upload');
+      } else if (error.message?.includes('Timeout')) {
+        console.error('[uploadImagesInBackground] Erro: Timeout geral no processo de upload');
+      } else if (error.message?.includes('Network') || error.name === 'NetworkError') {
+        console.error('[uploadImagesInBackground] Erro: Problema de rede geral');
+      }
+      // Continuar mesmo com erro - base64 ainda está no comic_data como fallback
     }
   };
 
@@ -2421,22 +3172,27 @@ PANEL DESCRIPTIONS:
       const pdfUrl = await generateAndUploadPDFWithFaces(faces);
       
       if (pdfUrl) {
-        // Atualizar banco com URL do PDF
-        const { error: updateError } = await supabase
-          .from('comics')
-          .update({ pdf_url: pdfUrl })
-          .eq('id', comicId);
-        
-        if (updateError) {
+        // Atualizar banco com URL do PDF via REST API
+        try {
+          await updateComic(comicId, { pdf_url: pdfUrl });
+          console.log('[generatePDFInBackground] ✅ PDF URL atualizada no banco:', pdfUrl);
+        } catch (updateError: any) {
           console.error('[generatePDFInBackground] Erro ao salvar PDF URL:', updateError);
-        } else {
-          console.log('[generatePDFInBackground] ✅ PDF salvo:', pdfUrl);
+          // Continuar mesmo se atualização falhar - PDF já foi gerado
         }
       } else {
         console.warn('[generatePDFInBackground] PDF não foi gerado, mas gibi já está salvo');
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error('[generatePDFInBackground] Erro ao gerar PDF:', error);
+      // Logs específicos de erro
+      if (error.message?.includes('401')) {
+        console.error('[generatePDFInBackground] Erro 401: Token de autenticação inválido');
+      } else if (error.message?.includes('403')) {
+        console.error('[generatePDFInBackground] Erro 403: Sem permissão');
+      } else if (error.message?.includes('Timeout')) {
+        console.error('[generatePDFInBackground] Erro: Timeout na geração/upload do PDF');
+      }
     }
   };
 
@@ -2618,6 +3374,17 @@ PANEL DESCRIPTIONS:
       
       <div className="pt-20 pb-10 container mx-auto px-4 min-h-[calc(100vh-80px)]">
         
+        {/* Saving Status Toast */}
+        {savingStatus && (
+          <div className="fixed top-20 right-4 z-[2001] max-w-md animate-in slide-in-from-right duration-300">
+            <div className="bg-blue-500 border-[6px] border-black shadow-[8px_8px_0px_rgba(0,0,0,1)] p-4">
+              <div className="font-comic text-xl text-white">
+                {savingStatus}
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Error Message Toast */}
         {errorMessage && (
           <div className="fixed top-20 left-1/2 transform -translate-x-1/2 z-[2000] max-w-2xl w-full mx-4 animate-in slide-in-from-top duration-300">
@@ -2825,6 +3592,7 @@ PANEL DESCRIPTIONS:
         {/* GALLERY TAB */}
         {activeTab === 'gallery' && (
             <Gallery
+              userId={user?.id}
               onSelectComic={(comic) => {
                 // Se tem PDF, abrir diretamente
                 if (comic.pdf_url) {

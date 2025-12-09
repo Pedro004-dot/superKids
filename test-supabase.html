@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Teste Supabase - Super Kids</title>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .test-section {
+            margin: 20px 0;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            background: #f9f9f9;
+        }
+        .success { border-color: #4CAF50; background: #f0fff0; }
+        .error { border-color: #f44336; background: #fff0f0; }
+        .warning { border-color: #ff9800; background: #fff8e1; }
+        button {
+            background: #4CAF50;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        button:hover { background: #45a049; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        .log {
+            background: #000;
+            color: #0f0;
+            padding: 10px;
+            border-radius: 5px;
+            font-family: monospace;
+            white-space: pre-wrap;
+            max-height: 300px;
+            overflow-y: auto;
+            margin: 10px 0;
+        }
+        input[type="file"] {
+            margin: 10px 0;
+            padding: 5px;
+        }
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🧪 Teste Supabase - Super Kids</h1>
+        <p>Este script testa o salvamento no banco de dados Supabase para identificar problemas.</p>
+
+        <!-- Status de Conexão -->
+        <div class="test-section" id="connection-status">
+            <h3>📡 Status da Conexão</h3>
+            <div id="connection-result" class="status">Aguardando teste...</div>
+            <button onclick="testConnection()">Testar Conexão</button>
+        </div>
+
+        <!-- Teste de Autenticação -->
+        <div class="test-section" id="auth-section">
+            <h3>🔐 Autenticação</h3>
+            <div id="auth-result" class="status">Não autenticado</div>
+            <input type="email" id="email" placeholder="Email" value="test@example.com">
+            <input type="password" id="password" placeholder="Senha" value="123456">
+            <button onclick="testAuth()">Login</button>
+            <button onclick="signUp()">Cadastrar</button>
+            <button onclick="logout()">Logout</button>
+        </div>
+
+        <!-- Upload de PDF -->
+        <div class="test-section" id="pdf-section">
+            <h3>📄 Upload de PDF</h3>
+            <input type="file" id="pdf-file" accept=".pdf">
+            <button onclick="uploadPDF()">Upload PDF</button>
+            <div id="pdf-result" class="status">Nenhum arquivo selecionado</div>
+        </div>
+
+        <!-- Teste de Salvamento Simples -->
+        <div class="test-section" id="save-section">
+            <h3>💾 Teste de Salvamento</h3>
+            <input type="text" id="hero-name" placeholder="Nome do Herói" value="Pedro Teste">
+            <button onclick="testSimpleSave()">Salvar Dados Básicos</button>
+            <button onclick="testComplexSave()">Salvar Dados Complexos</button>
+            <div id="save-result" class="status">Aguardando teste...</div>
+        </div>
+
+        <!-- Teste de Listagem -->
+        <div class="test-section" id="list-section">
+            <h3>📋 Listar Comics</h3>
+            <button onclick="listComics()">Listar Comics</button>
+            <button onclick="clearComics()">Limpar Todos</button>
+            <div id="list-result" class="status">Aguardando teste...</div>
+        </div>
+
+        <!-- Logs -->
+        <div class="test-section">
+            <h3>📝 Logs</h3>
+            <button onclick="clearLogs()">Limpar Logs</button>
+            <div id="logs" class="log">Logs aparecerão aqui...\n</div>
+        </div>
+    </div>
+
+    <script>
+        // ⚠️ ATENÇÃO: Substitua com suas credenciais do .env
+        // Obtenha em: https://supabase.com/dashboard/project/_/settings/api
+        // Use a ANON KEY (formato JWT longo), NÃO a Publishable Key!
+        const SUPABASE_URL = 'SEU_SUPABASE_URL_AQUI';
+        const SUPABASE_ANON_KEY = 'SUA_ANON_KEY_AQUI';
+        
+        const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+        
+        function log(message) {
+            const timestamp = new Date().toLocaleTimeString();
+            const logElement = document.getElementById('logs');
+            logElement.textContent += `[${timestamp}] ${message}\n`;
+            logElement.scrollTop = logElement.scrollHeight;
+            console.log(message);
+        }
+
+        function clearLogs() {
+            document.getElementById('logs').textContent = 'Logs limpos...\n';
+        }
+
+        function updateStatus(elementId, message, type = 'info') {
+            const element = document.getElementById(elementId);
+            element.textContent = message;
+            element.className = `status ${type}`;
+        }
+
+        // Teste de Conexão
+        async function testConnection() {
+            log('🔍 Testando conexão com Supabase...');
+            updateStatus('connection-result', 'Testando...', 'warning');
+            
+            try {
+                const { data, error } = await supabase.from('comics').select('count', { count: 'exact' });
+                
+                if (error) {
+                    log(`❌ Erro de conexão: ${error.message}`);
+                    updateStatus('connection-result', `Erro: ${error.message}`, 'error');
+                } else {
+                    log('✅ Conexão com Supabase OK');
+                    updateStatus('connection-result', 'Conexão OK', 'success');
+                }
+            } catch (err) {
+                log(`❌ Exceção na conexão: ${err.message}`);
+                updateStatus('connection-result', `Exceção: ${err.message}`, 'error');
+            }
+        }
+
+        // Teste de Autenticação
+        async function testAuth() {
+            const email = document.getElementById('email').value;
+            const password = document.getElementById('password').value;
+            
+            log(`🔐 Tentando login com: ${email}`);
+            updateStatus('auth-result', 'Fazendo login...', 'warning');
+            
+            try {
+                const { data, error } = await supabase.auth.signInWithPassword({
+                    email: email,
+                    password: password
+                });
+                
+                if (error) {
+                    log(`❌ Erro de login: ${error.message}`);
+                    updateStatus('auth-result', `Erro: ${error.message}`, 'error');
+                } else {
+                    log(`✅ Login bem-sucedido: ${data.user.id}`);
+                    updateStatus('auth-result', `Logado: ${data.user.email}`, 'success');
+                }
+            } catch (err) {
+                log(`❌ Exceção no login: ${err.message}`);
+                updateStatus('auth-result', `Exceção: ${err.message}`, 'error');
+            }
+        }
+
+        async function signUp() {
+            const email = document.getElementById('email').value;
+            const password = document.getElementById('password').value;
+            
+            log(`📝 Tentando cadastro com: ${email}`);
+            
+            try {
+                const { data, error } = await supabase.auth.signUp({
+                    email: email,
+                    password: password
+                });
+                
+                if (error) {
+                    log(`❌ Erro de cadastro: ${error.message}`);
+                    updateStatus('auth-result', `Erro: ${error.message}`, 'error');
+                } else {
+                    log(`✅ Cadastro bem-sucedido: ${data.user?.id || 'Confirme email'}`);
+                    updateStatus('auth-result', 'Cadastro OK - Confirme email', 'success');
+                }
+            } catch (err) {
+                log(`❌ Exceção no cadastro: ${err.message}`);
+                updateStatus('auth-result', `Exceção: ${err.message}`, 'error');
+            }
+        }
+
+        async function logout() {
+            log('🚪 Fazendo logout...');
+            
+            try {
+                const { error } = await supabase.auth.signOut();
+                
+                if (error) {
+                    log(`❌ Erro de logout: ${error.message}`);
+                } else {
+                    log('✅ Logout bem-sucedido');
+                    updateStatus('auth-result', 'Não autenticado', 'warning');
+                }
+            } catch (err) {
+                log(`❌ Exceção no logout: ${err.message}`);
+            }
+        }
+
+        // Upload de PDF
+        async function uploadPDF() {
+            const fileInput = document.getElementById('pdf-file');
+            const file = fileInput.files[0];
+            
+            if (!file) {
+                updateStatus('pdf-result', 'Selecione um arquivo PDF', 'warning');
+                return;
+            }
+            
+            log(`📄 Fazendo upload do PDF: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`);
+            updateStatus('pdf-result', 'Fazendo upload...', 'warning');
+            
+            try {
+                // Verificar usuário
+                const { data: { user }, error: userError } = await supabase.auth.getUser();
+                
+                if (userError || !user) {
+                    log('❌ Usuário não autenticado para upload');
+                    updateStatus('pdf-result', 'Faça login primeiro', 'error');
+                    return;
+                }
+                
+                // Upload para storage
+                const fileName = `test-${Date.now()}-${file.name}`;
+                const filePath = `${user.id}/pdfs/${fileName}`;
+                
+                const { data, error } = await supabase.storage
+                    .from('comics-images')
+                    .upload(filePath, file, {
+                        contentType: 'application/pdf',
+                        upsert: true
+                    });
+                
+                if (error) {
+                    log(`❌ Erro no upload: ${error.message}`);
+                    updateStatus('pdf-result', `Erro: ${error.message}`, 'error');
+                } else {
+                    // Obter URL pública
+                    const { data: urlData } = supabase.storage
+                        .from('comics-images')
+                        .getPublicUrl(filePath);
+                    
+                    log(`✅ Upload bem-sucedido: ${urlData.publicUrl}`);
+                    updateStatus('pdf-result', 'Upload OK', 'success');
+                }
+            } catch (err) {
+                log(`❌ Exceção no upload: ${err.message}`);
+                updateStatus('pdf-result', `Exceção: ${err.message}`, 'error');
+            }
+        }
+
+        // Teste de Salvamento Simples
+        async function testSimpleSave() {
+            const heroName = document.getElementById('hero-name').value;
+            
+            log('💾 Testando salvamento simples...');
+            updateStatus('save-result', 'Salvando...', 'warning');
+            
+            try {
+                // Verificar usuário
+                const { data: { user }, error: userError } = await supabase.auth.getUser();
+                
+                if (userError || !user) {
+                    log('❌ Usuário não autenticado para salvar');
+                    updateStatus('save-result', 'Faça login primeiro', 'error');
+                    return;
+                }
+                
+                // Payload simples
+                const payload = {
+                    user_id: user.id,
+                    hero_name: heroName,
+                    genre: 'Teste',
+                    story_tone: 'Teste',
+                    total_pages: 1,
+                    comic_data: { test: true, timestamp: new Date().toISOString() }
+                };
+                
+                log(`📊 Payload: ${JSON.stringify(payload, null, 2)}`);
+                
+                const { data, error } = await supabase
+                    .from('comics')
+                    .insert(payload)
+                    .select()
+                    .single();
+                
+                if (error) {
+                    log(`❌ Erro no salvamento: ${error.message}`);
+                    log(`📊 Detalhes: ${JSON.stringify(error, null, 2)}`);
+                    updateStatus('save-result', `Erro: ${error.message}`, 'error');
+                } else {
+                    log(`✅ Salvamento bem-sucedido: ${data.id}`);
+                    updateStatus('save-result', `Salvo: ${data.id}`, 'success');
+                }
+            } catch (err) {
+                log(`❌ Exceção no salvamento: ${err.message}`);
+                updateStatus('save-result', `Exceção: ${err.message}`, 'error');
+            }
+        }
+
+        // Teste de Salvamento Complexo
+        async function testComplexSave() {
+            const heroName = document.getElementById('hero-name').value;
+            
+            log('💾 Testando salvamento complexo...');
+            updateStatus('save-result', 'Salvando dados complexos...', 'warning');
+            
+            try {
+                // Verificar usuário
+                const { data: { user }, error: userError } = await supabase.auth.getUser();
+                
+                if (userError || !user) {
+                    log('❌ Usuário não autenticado para salvar');
+                    updateStatus('save-result', 'Faça login primeiro', 'error');
+                    return;
+                }
+                
+                // Payload complexo (similar ao app real)
+                const complexData = {
+                    heroName: heroName,
+                    selectedGenre: 'Aventura',
+                    storyTone: 'EMPOLGANTE',
+                    createdAt: new Date().toISOString(),
+                    totalPages: 12,
+                    // Simular dados grandes
+                    largeData: Array(1000).fill('test').join('')
+                };
+                
+                const payload = {
+                    user_id: user.id,
+                    hero_name: heroName,
+                    genre: 'Aventura',
+                    story_tone: 'EMPOLGANTE',
+                    total_pages: 12,
+                    comic_data: complexData,
+                    series_id: null,
+                    part_number: null,
+                    is_series_part: false
+                };
+                
+                log(`📊 Payload complexo: ${JSON.stringify(payload).length} bytes`);
+                
+                const { data, error } = await supabase
+                    .from('comics')
+                    .insert(payload)
+                    .select()
+                    .single();
+                
+                if (error) {
+                    log(`❌ Erro no salvamento complexo: ${error.message}`);
+                    log(`📊 Detalhes: ${JSON.stringify(error, null, 2)}`);
+                    updateStatus('save-result', `Erro: ${error.message}`, 'error');
+                } else {
+                    log(`✅ Salvamento complexo bem-sucedido: ${data.id}`);
+                    updateStatus('save-result', `Salvo complexo: ${data.id}`, 'success');
+                }
+            } catch (err) {
+                log(`❌ Exceção no salvamento complexo: ${err.message}`);
+                updateStatus('save-result', `Exceção: ${err.message}`, 'error');
+            }
+        }
+
+        // Listar Comics
+        async function listComics() {
+            log('📋 Listando comics...');
+            updateStatus('list-result', 'Carregando...', 'warning');
+            
+            try {
+                const { data, error } = await supabase
+                    .from('comics')
+                    .select('id, hero_name, genre, created_at, total_pages')
+                    .order('created_at', { ascending: false });
+                
+                if (error) {
+                    log(`❌ Erro ao listar: ${error.message}`);
+                    updateStatus('list-result', `Erro: ${error.message}`, 'error');
+                } else {
+                    log(`✅ Comics encontrados: ${data.length}`);
+                    data.forEach((comic, index) => {
+                        log(`  ${index + 1}. ${comic.hero_name} (${comic.genre}) - ${comic.total_pages} páginas`);
+                    });
+                    updateStatus('list-result', `${data.length} comics encontrados`, 'success');
+                }
+            } catch (err) {
+                log(`❌ Exceção ao listar: ${err.message}`);
+                updateStatus('list-result', `Exceção: ${err.message}`, 'error');
+            }
+        }
+
+        // Limpar Comics
+        async function clearComics() {
+            if (!confirm('Tem certeza que deseja deletar TODOS os comics?')) {
+                return;
+            }
+            
+            log('🗑️ Limpando todos os comics...');
+            updateStatus('list-result', 'Deletando...', 'warning');
+            
+            try {
+                const { data, error } = await supabase
+                    .from('comics')
+                    .delete()
+                    .neq('id', '00000000-0000-0000-0000-000000000000'); // Deletar todos
+                
+                if (error) {
+                    log(`❌ Erro ao deletar: ${error.message}`);
+                    updateStatus('list-result', `Erro: ${error.message}`, 'error');
+                } else {
+                    log(`✅ Comics deletados com sucesso`);
+                    updateStatus('list-result', 'Todos os comics foram deletados', 'success');
+                }
+            } catch (err) {
+                log(`❌ Exceção ao deletar: ${err.message}`);
+                updateStatus('list-result', `Exceção: ${err.message}`, 'error');
+            }
+        }
+
+        // Inicializar
+        window.onload = function() {
+            log('🚀 Script de teste carregado');
+            log('📝 Instruções:');
+            log('1. Teste a conexão primeiro');
+            log('2. Faça login ou cadastre-se');
+            log('3. Teste o salvamento simples');
+            log('4. Teste o upload de PDF');
+            log('5. Verifique os logs para identificar problemas');
+            
+            // Testar conexão automaticamente
+            setTimeout(testConnection, 1000);
+        };
+    </script>
+</body>
+</html>
